@@ -261,7 +261,8 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 		for j, cell := range row {
 			// 根据单元格类型提取值
 			if cell.String != nil {
-				result[i][j] = *cell.String
+				// 将换行符转换为 <br> 标签，以便在 markdown 表格中正确显示
+				result[i][j] = strings.ReplaceAll(*cell.String, "\n", "<br>")
 			} else if cell.Int != nil {
 				result[i][j] = fmt.Sprintf("%d", *cell.Int)
 			} else if cell.Float != nil {
