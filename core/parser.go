@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -11,13 +12,15 @@ import (
 )
 
 type Parser struct {
+	client     *Client
 	useHTMLTags bool
 	ImgTokens   []string
 	blockMap    map[string]*lark.DocxBlock
 }
 
-func NewParser(config OutputConfig) *Parser {
+func NewParser(config OutputConfig, client *Client) *Parser {
 	return &Parser{
+		client:     client,
 		useHTMLTags: config.UseHTMLTags,
 		ImgTokens:   make([]string, 0),
 		blockMap:    make(map[string]*lark.DocxBlock),
@@ -183,6 +186,8 @@ func (p *Parser) ParseDocxBlock(b *lark.DocxBlock, indentLevel int) string {
 		buf.WriteString(p.ParseDocxBlockTableCell(b))
 	case lark.DocxBlockTypeTable:
 		buf.WriteString(p.ParseDocxBlockTable(b.Table))
+	case lark.DocxBlockTypeSheet:
+		buf.WriteString(p.ParseDocxBlockSheet(b.Sheet))
 	case lark.DocxBlockTypeQuoteContainer:
 		buf.WriteString(p.ParseDocxBlockQuoteContainer(b))
 	case lark.DocxBlockTypeGrid:
@@ -474,10 +479,19 @@ func (p *Parser) ParseDocxBlockTable(t *lark.DocxBlockTable) string {
 func (p *Parser) ParseDocxBlockQuoteContainer(b *lark.DocxBlock) string {
 	buf := new(strings.Builder)
 
-	for _, child := range b.Children {
+	for i, child := range b.Children {
 		block := p.blockMap[child]
 		buf.WriteString("> ")
-		buf.WriteString(p.ParseDocxBlock(block, 0))
+		content := p.ParseDocxBlock(block, 0)
+		// 移除内容末尾的换行符
+		content = strings.TrimRight(content, "\n")
+		buf.WriteString(content)
+		// 在行尾添加两个空格来实现换行（markdown 语法）
+		buf.WriteString("  ")
+		// 如果不是最后一个子块，则添加换行符
+		if i < len(b.Children)-1 {
+			buf.WriteString("\n")
+		}
 	}
 
 	return buf.String()
@@ -493,6 +507,89 @@ func (p *Parser) ParseDocxBlockGrid(b *lark.DocxBlock, indentLevel int) string {
 			buf.WriteString(p.ParseDocxBlock(block, indentLevel))
 		}
 	}
+
+	return buf.String()
+}
+
+func (p *Parser) ParseDocxBlockSheet(s *lark.DocxBlockSheet) string {
+	// 电子表格块（Sheet）是嵌入到飞书文档中的外部电子表格
+	buf := new(strings.Builder)
+
+	// 如果没有 client 或 token，则返回占位符
+	if p.client == nil || s.Token == "" {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *注：无法获取电子表格内容（缺少 client 或 token）*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 尝试获取电子表格的实际内容
+	ctx := context.Background()
+	values, err := p.client.GetSheetContent(ctx, s.Token)
+	if err != nil {
+		// 如果获取失败，返回占位符
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		// 检查是否是 token 格式问题
+		if strings.Contains(err.Error(), "invalid spreadsheet token format") {
+			buf.WriteString("> *注：此电子表格使用了不支持的嵌入方式，无法获取内容*\n")
+		} else if strings.Contains(err.Error(), "91402") || strings.Contains(err.Error(), "NOTEXIST") {
+			buf.WriteString("> *注：无法访问电子表格（可能没有权限或电子表格不存在）*\n")
+		} else {
+			buf.WriteString(fmt.Sprintf("> *获取电子表格内容失败: %v*\n", err))
+		}
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 将电子表格数据转换为 markdown 表格
+	if len(values) == 0 {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *电子表格为空*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 生成 markdown 表格
+	buf.WriteString("\n\n")
+	// 表头
+	buf.WriteString("|")
+	for _, cell := range values[0] {
+		buf.WriteString(" " + cell + " |")
+	}
+	buf.WriteString("\n")
+	// 分隔线
+	buf.WriteString("|")
+	for range values[0] {
+		buf.WriteString(" --- |")
+	}
+	buf.WriteString("\n")
+	// 数据行
+	for i := 1; i < len(values); i++ {
+		buf.WriteString("|")
+		for _, cell := range values[i] {
+			buf.WriteString(" " + cell + " |")
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("\n")
 
 	return buf.String()
 }

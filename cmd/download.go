@@ -53,7 +53,7 @@ func downloadDocument(ctx context.Context, client *core.Client, url string, opts
 	docx, blocks, err := client.GetDocxContent(ctx, docToken)
 	utils.CheckErr(err)
 
-	parser := core.NewParser(dlConfig.Output)
+	parser := core.NewParser(dlConfig.Output, client)
 
 	title := docx.Title
 	markdown := parser.ParseDocxContent(docx, blocks)

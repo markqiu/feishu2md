@@ -40,7 +40,7 @@ func downloadHandler(c *gin.Context) {
 	)
 
 	// Process the download
-	parser := core.NewParser(config.Output)
+	parser := core.NewParser(config.Output, client)
 	markdown := ""
 
 	// for a wiki page, we need to renew docType and docToken first
