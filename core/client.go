@@ -3,8 +3,10 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,13 +194,53 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 	spreadsheetToken := sheetToken[:lastUnderscore]
 	sheetID := sheetToken[lastUnderscore+1:]
 	
-	// 获取电子表格的数据
-	// 使用正确的 range 格式：sheetId
+	// 定义原始 API 响应结构，使用 interface{} 来处理任意类型的值
+	type SheetValueResponse struct {
+		Code int `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ValueRanges []struct {
+				MajorDimension string         `json:"majorDimension"`
+				Range          string         `json:"range"`
+				Values         [][]interface{} `json:"values"`
+			} `json:"valueRanges"`
+		} `json:"data"`
+	}
+	
+	// 构建请求体
+	requestBody := map[string]interface{}{
+		"spreadsheetToken": spreadsheetToken,
+		"ranges":           []string{sheetID},
+	}
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	
+	// 创建 HTTP 请求
+	// 使用飞书 API 的 endpoint
+	url := "https://open.feishu.cn/open-apis/sheets/v4/spreadsheets/" + spreadsheetToken + "/values:batchGet"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	// 设置请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	
+	// 获取访问令牌
+	// 注意：这里需要从 lark client 获取访问令牌
+	// 由于 lark SDK 没有直接提供获取令牌的方法，我们需要使用 SDK 的认证机制
+	// 作为一个 workaround，我们使用 SDK 的方法，但手动处理响应
+	
+	// 尝试使用 SDK 的方法
 	valueResp, _, err := c.larkClient.Drive.BatchGetSheetValue(ctx, &lark.BatchGetSheetValueReq{
 		SpreadSheetToken: spreadsheetToken,
 		Ranges:           []string{sheetID},
 	})
 	if err != nil {
+		// 如果失败，返回详细的错误信息
 		return nil, fmt.Errorf("failed to get sheet values: %w", err)
 	}
 
@@ -222,6 +264,9 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 				result[i][j] = *cell.String
 			} else if cell.Int != nil {
 				result[i][j] = fmt.Sprintf("%d", *cell.Int)
+			} else if cell.Float != nil {
+				// 处理浮点数
+				result[i][j] = fmt.Sprintf("%g", *cell.Float)
 			} else if cell.Link != nil {
 				result[i][j] = cell.Link.Text
 			} else if cell.Formula != nil {
@@ -242,8 +287,10 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 					case bool:
 						values[k] = fmt.Sprintf("%t", val)
 					case float64:
-						values[k] = fmt.Sprintf("%f", val)
+						values[k] = fmt.Sprintf("%g", val) // 使用 %g 去掉不必要的零
 					case int:
+						values[k] = fmt.Sprintf("%d", val)
+					case int64:
 						values[k] = fmt.Sprintf("%d", val)
 					default:
 						values[k] = fmt.Sprintf("%v", val)

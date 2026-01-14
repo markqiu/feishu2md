@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/88250/lute v1.7.3
-	github.com/chyroc/lark v0.0.98-0.20220914014759-f9ad5a16e595
+	github.com/chyroc/lark v0.0.113
 	github.com/joho/godotenv v1.4.0
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/urfave/cli/v2 v2.6.0
@@ -13,7 +13,7 @@ require (
 require (
 	github.com/gin-gonic/gin v1.9.0
 	github.com/pkg/errors v0.9.1
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.8.2
 )
 
 require (
