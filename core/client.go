@@ -69,6 +69,116 @@ func (c *Client) DownloadImageRaw(ctx context.Context, imgToken, imgDir string) 
 	return filename, buf.Bytes(), nil
 }
 
+// DownloadFile downloads any file from Feishu Drive (including mindnote, video, etc.)
+// For unsupported file types, it creates a markdown file with a link to the original file
+//
+// Note: There are two different download APIs in Feishu:
+// 1. DownloadDriveMedia - for downloading media resources (images, attachments) inside documents
+// 2. DownloadDriveFile - for downloading standalone files in cloud drive
+//
+// For file objects (mindnote, file, sheet, bitable), we should use DownloadDriveFile
+// For media blocks inside documents, we should use DownloadDriveMedia
+func (c *Client) DownloadFile(ctx context.Context, fileToken, outDir, objType, title string) (string, error) {
+	var (
+		file     io.Reader
+		filename string
+		err      error
+	)
+
+	// Try DownloadDriveFile first for standalone files (mindnote, video, PDF, etc.)
+	// This is the correct API for downloading files from cloud drive
+	resp, _, err := c.larkClient.Drive.DownloadDriveFile(ctx, &lark.DownloadDriveFileReq{
+		FileToken: fileToken,
+	})
+	if err != nil {
+		// If DownloadDriveFile fails, try DownloadDriveMedia as fallback
+		// This handles the case where the file is actually a media resource inside a document
+		mediaResp, _, mediaErr := c.larkClient.Drive.DownloadDriveMedia(ctx, &lark.DownloadDriveMediaReq{
+			FileToken: fileToken,
+		})
+		if mediaErr != nil {
+			// Both APIs failed, create a placeholder
+			return c.createFilePlaceholder(ctx, fileToken, outDir, objType, title)
+		}
+		if mediaResp == nil {
+			return c.createFilePlaceholder(ctx, fileToken, outDir, objType, title)
+		}
+		file = mediaResp.File
+		filename = mediaResp.Filename
+	} else {
+		if resp == nil {
+			return c.createFilePlaceholder(ctx, fileToken, outDir, objType, title)
+		}
+		file = resp.File
+		filename = resp.Filename
+	}
+	
+	// Use the original filename from the response
+	if filename == "" {
+		// Fallback to token if filename is empty
+		filename = fileToken
+	}
+	
+	filePath := filepath.Join(outDir, filename)
+	err = os.MkdirAll(filepath.Dir(filePath), 0o755)
+	if err != nil {
+		return "", err
+	}
+	
+	fileHandle, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o666)
+	if err != nil {
+		return "", err
+	}
+	defer fileHandle.Close()
+	
+	_, err = io.Copy(fileHandle, file)
+	if err != nil {
+		return "", err
+	}
+	
+	return filePath, nil
+}
+
+// createFilePlaceholder creates a markdown file with a link to the original file
+func (c *Client) createFilePlaceholder(ctx context.Context, fileToken, outDir, objType, title string) (string, error) {
+	// Create a markdown file with the same name as the title
+	mdFilename := title + ".md"
+	mdPath := filepath.Join(outDir, mdFilename)
+	
+	// Ensure the directory exists
+	err := os.MkdirAll(outDir, 0o755)
+	if err != nil {
+		return "", err
+	}
+	
+	// Get the file type description
+	var fileType string
+	switch objType {
+	case "mindnote":
+		fileType = "思维导图"
+	case "file":
+		fileType = "文件"
+	case "sheet":
+		fileType = "表格"
+	case "bitable":
+		fileType = "多维表格"
+	default:
+		fileType = "文件"
+	}
+	
+	content := fmt.Sprintf("# %s\n\n**文件类型**: %s\n\n", title, fileType)
+	content += fmt.Sprintf("**文件Token**: `%s`\n\n", fileToken)
+	content += fmt.Sprintf("**提示**: 这是一个%s文件，无法直接转换为Markdown。\n\n", fileType)
+	content += fmt.Sprintf("请访问飞书查看原始文件: [点击打开](https://jinniuai.feishu.cn/%s/%s)\n", objType, fileToken)
+	
+	err = os.WriteFile(mdPath, []byte(content), 0o644)
+	if err != nil {
+		return "", err
+	}
+	
+	return mdPath, nil
+}
+
 func (c *Client) GetDocxContent(ctx context.Context, docToken string) (*lark.DocxDocument, []*lark.DocxBlock, error) {
 	resp, _, err := c.larkClient.Drive.GetDocxDocument(ctx, &lark.GetDocxDocumentReq{
 		DocumentID: docToken,
@@ -304,5 +414,71 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 		}
 	}
 
+	return result, nil
+}
+
+// GetBitableContent 获取多维表格的内容
+func (c *Client) GetBitableContent(ctx context.Context, bitableToken string) ([][]string, error) {
+	// bitableToken 的格式是：app_token + "_" + table_id
+	// 例如：CZJHb9XisaEsWosyB1pcAk2WnRg_tblxxxxx
+	// 需要解析出 app_token 和 table_id
+	
+	// 查找最后一个下划线，分隔 app_token 和 table_id
+	lastUnderscore := strings.LastIndex(bitableToken, "_")
+	if lastUnderscore == -1 {
+		return nil, fmt.Errorf("invalid bitable token format (missing underscore separator): %s", bitableToken)
+	}
+	
+	appToken := bitableToken[:lastUnderscore]
+	tableID := bitableToken[lastUnderscore+1:]
+	
+	// 1. 获取表格的字段信息
+	fieldResp, _, err := c.larkClient.Bitable.GetBitableFieldList(ctx, &lark.GetBitableFieldListReq{
+		AppToken: appToken,
+		TableID: tableID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bitable fields: %w", err)
+	}
+	
+	// 2. 获取表格的记录
+	recordResp, _, err := c.larkClient.Bitable.GetBitableRecordList(ctx, &lark.GetBitableRecordListReq{
+		AppToken: appToken,
+		TableID: tableID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bitable records: %w", err)
+	}
+	
+	// 3. 构建表格数据
+	// 第一行是字段名
+	var result [][]string
+	
+	// 添加表头（字段名）
+	if len(fieldResp.Items) > 0 {
+		var header []string
+		for _, field := range fieldResp.Items {
+			header = append(header, field.FieldName)
+		}
+		result = append(result, header)
+	}
+	
+	// 添加数据行
+	if len(recordResp.Items) > 0 {
+		for _, record := range recordResp.Items {
+			var row []string
+			for _, field := range fieldResp.Items {
+				// 从记录中获取字段值
+				if value, ok := record.Fields[field.FieldID]; ok {
+					// 将值转换为字符串
+					row = append(row, fmt.Sprintf("%v", value))
+				} else {
+					row = append(row, "")
+				}
+			}
+			result = append(result, row)
+		}
+	}
+	
 	return result, nil
 }
