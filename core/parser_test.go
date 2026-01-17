@@ -39,7 +39,7 @@ func TestParseDocxContent(t *testing.T) {
 			byteValue, _ := io.ReadAll(jsonFile)
 			json.Unmarshal(byteValue, &data)
 
-			parser := core.NewParser(core.NewConfig("", "").Output)
+			parser := core.NewParser(core.NewConfig("", "").Output, nil)
 			mdParsed := parser.ParseDocxContent(data.Document, data.Blocks)
 			fmt.Println(mdParsed)
 			mdParsed = engine.FormatStr("md", mdParsed)

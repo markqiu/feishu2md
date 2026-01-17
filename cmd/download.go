@@ -34,6 +34,7 @@ func downloadDocument(ctx context.Context, client *core.Client, url string, opts
 	fmt.Println("Captured document token:", docToken)
 
 	// for a wiki page, we need to renew docType and docToken first
+	var nodeTitle string
 	if docType == "wiki" {
 		node, err := client.GetWikiNodeInfo(ctx, docToken)
 		if err != nil {
@@ -42,6 +43,7 @@ func downloadDocument(ctx context.Context, client *core.Client, url string, opts
 		utils.CheckErr(err)
 		docType = node.ObjType
 		docToken = node.ObjToken
+		nodeTitle = node.Title
 	}
 	if docType == "docs" {
 		return errors.Errorf(
@@ -49,11 +51,18 @@ func downloadDocument(ctx context.Context, client *core.Client, url string, opts
 				`Please refer to the Readme/Release for v1_support.`)
 	}
 
+	// Handle non-docx file types (mindnote, file, sheet, bitable)
+	if docType != "docx" {
+		return downloadFile(ctx, client, docToken, nodeTitle, opts.outputDir, docType)
+	}
+
 	// Process the download
 	docx, blocks, err := client.GetDocxContent(ctx, docToken)
 	utils.CheckErr(err)
 
-	parser := core.NewParser(dlConfig.Output)
+	parser := core.NewParser(dlConfig.Output, client)
+	parser.SetContext(ctx)
+	parser.SetOutputDir(filepath.Join(opts.outputDir, dlConfig.Output.ImageDir))
 
 	title := docx.Title
 	markdown := parser.ParseDocxContent(docx, blocks)
@@ -170,9 +179,28 @@ func downloadDocuments(ctx context.Context, client *core.Client, url string) err
 }
 
 func downloadWiki(ctx context.Context, client *core.Client, url string) error {
-	prefixURL, spaceID, err := utils.ValidateWikiURL(url)
+	prefixURL, wikiToken, err := utils.ValidateWikiURL(url)
 	if err != nil {
 		return err
+	}
+
+	var spaceID string
+	// Check if the token is a space_id (from /wiki/settings/ URL) or a node_token (from /wiki/ URL)
+	// Try to get wiki space info first - if it works, it's a space_id
+	_, err = client.GetWikiName(ctx, wikiToken)
+	if err == nil {
+		// It's a valid space_id
+		spaceID = wikiToken
+	} else {
+		// It's likely a node_token, get node info to extract space_id
+		node, err := client.GetWikiNodeInfo(ctx, wikiToken)
+		if err != nil {
+			return fmt.Errorf("failed to get wiki node info: %v", err)
+		}
+		if node.SpaceID == "" {
+			return fmt.Errorf("node does not have a space_id")
+		}
+		spaceID = node.SpaceID
 	}
 
 	folderPath, err := client.GetWikiName(ctx, spaceID)
@@ -182,6 +210,8 @@ func downloadWiki(ctx context.Context, client *core.Client, url string) error {
 	if folderPath == "" {
 		return fmt.Errorf("failed to GetWikiName")
 	}
+	// Combine with output directory
+	folderPath = filepath.Join(dlOpts.outputDir, folderPath)
 
 	errChan := make(chan error)
 
@@ -205,13 +235,8 @@ func downloadWiki(ctx context.Context, client *core.Client, url string) error {
 			return err
 		}
 		for _, n := range nodes {
-			if n.HasChild {
-				_folderPath := filepath.Join(folderPath, n.Title)
-				if err := downloadWikiNode(ctx, client,
-					spaceID, _folderPath, &n.NodeToken); err != nil {
-					return err
-				}
-			}
+			// 先处理节点本身的文档内容（如果有的话）
+			// Handle different object types
 			if n.ObjType == "docx" {
 				opts := DownloadOpts{outputDir: folderPath, dump: dlOpts.dump, batch: false}
 				wg.Add(1)
@@ -223,7 +248,30 @@ func downloadWiki(ctx context.Context, client *core.Client, url string) error {
 					wg.Done()
 					<-semaphore
 				}(prefixURL + "/wiki/" + n.NodeToken)
-				// downloadDocument(ctx, client, prefixURL+"/wiki/"+n.NodeToken, &opts)
+			} else if n.ObjType == "mindnote" || n.ObjType == "file" || n.ObjType == "sheet" || n.ObjType == "bitable" {
+				// Download other file types (mindnote, video, sheet, bitable, etc.)
+				// Capture variables for goroutine
+				objToken := n.ObjToken
+				title := n.Title
+				objType := n.ObjType
+				wg.Add(1)
+				semaphore <- struct{}{}
+				go func() {
+					if err := downloadFile(ctx, client, objToken, title, folderPath, objType); err != nil {
+						errChan <- err
+					}
+					wg.Done()
+					<-semaphore
+				}()
+			}
+
+			// 然后递归处理子节点
+			if n.HasChild {
+				_folderPath := filepath.Join(folderPath, n.Title)
+				if err := downloadWikiNode(ctx, client,
+					spaceID, _folderPath, &n.NodeToken); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -271,4 +319,14 @@ func handleDownloadCommand(url string) error {
 	}
 
 	return downloadDocument(ctx, client, url, &dlOpts)
+}
+
+func downloadFile(ctx context.Context, client *core.Client, nodeToken, title, outputDir, objType string) error {
+	// Download the file using the objToken
+	filePath, err := client.DownloadFile(ctx, nodeToken, outputDir, objType, title)
+	if err != nil {
+		return fmt.Errorf("failed to download file %s: %v", title, err)
+	}
+	fmt.Printf("Downloaded file to %s\n", filePath)
+	return nil
 }

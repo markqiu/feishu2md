@@ -1,7 +1,10 @@
 package core
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -11,17 +14,33 @@ import (
 )
 
 type Parser struct {
+	client      *Client
 	useHTMLTags bool
 	ImgTokens   []string
 	blockMap    map[string]*lark.DocxBlock
+	ctx         context.Context
+	outputDir   string
 }
 
-func NewParser(config OutputConfig) *Parser {
+func NewParser(config OutputConfig, client *Client) *Parser {
 	return &Parser{
+		client:      client,
 		useHTMLTags: config.UseHTMLTags,
 		ImgTokens:   make([]string, 0),
 		blockMap:    make(map[string]*lark.DocxBlock),
+		ctx:         context.Background(),
+		outputDir:   "",
 	}
+}
+
+// SetContext sets the context for the parser
+func (p *Parser) SetContext(ctx context.Context) {
+	p.ctx = ctx
+}
+
+// SetOutputDir sets the output directory for the parser
+func (p *Parser) SetOutputDir(outputDir string) {
+	p.outputDir = outputDir
 }
 
 // =============================================================
@@ -128,6 +147,7 @@ func (p *Parser) ParseDocxContent(doc *lark.DocxDocument, blocks []*lark.DocxBlo
 func (p *Parser) ParseDocxBlock(b *lark.DocxBlock, indentLevel int) string {
 	buf := new(strings.Builder)
 	buf.WriteString(strings.Repeat("\t", indentLevel))
+
 	switch b.BlockType {
 	case lark.DocxBlockTypePage:
 		buf.WriteString(p.ParseDocxBlockPage(b))
@@ -179,15 +199,30 @@ func (p *Parser) ParseDocxBlock(b *lark.DocxBlock, indentLevel int) string {
 		buf.WriteString("---\n")
 	case lark.DocxBlockTypeImage:
 		buf.WriteString(p.ParseDocxBlockImage(b.Image))
+	case lark.DocxBlockTypeFile:
+		buf.WriteString(p.ParseDocxBlockFile(b.File))
+	case lark.DocxBlockTypeBitable:
+		buf.WriteString(p.ParseDocxBlockBitable(b.Bitable))
+	case lark.DocxBlockTypeDiagram:
+		buf.WriteString(p.ParseDocxBlockDiagram(b.Diagram))
+	case lark.DocxBlockTypeIframe:
+		buf.WriteString(p.ParseDocxBlockIframe(b.Iframe))
 	case lark.DocxBlockTypeTableCell:
 		buf.WriteString(p.ParseDocxBlockTableCell(b))
 	case lark.DocxBlockTypeTable:
 		buf.WriteString(p.ParseDocxBlockTable(b.Table))
+	case lark.DocxBlockTypeSheet:
+		buf.WriteString(p.ParseDocxBlockSheet(b.Sheet))
 	case lark.DocxBlockTypeQuoteContainer:
 		buf.WriteString(p.ParseDocxBlockQuoteContainer(b))
 	case lark.DocxBlockTypeGrid:
 		buf.WriteString(p.ParseDocxBlockGrid(b, indentLevel))
 	default:
+		// 对于不支持的 block type，仍然处理其 children
+		for _, childId := range b.Children {
+			childBlock := p.blockMap[childId]
+			buf.WriteString(p.ParseDocxBlock(childBlock, indentLevel))
+		}
 	}
 	return buf.String()
 }
@@ -319,6 +354,75 @@ func (p *Parser) ParseDocxBlockImage(img *lark.DocxBlockImage) string {
 	buf.WriteString(fmt.Sprintf("![](%s)", img.Token))
 	buf.WriteString("\n")
 	p.ImgTokens = append(p.ImgTokens, img.Token)
+	return buf.String()
+}
+
+func (p *Parser) ParseDocxBlockFile(file *lark.DocxBlockFile) string {
+	buf := new(strings.Builder)
+
+	// Get file extension to determine file type
+	var fileType string
+	var fileName string
+	if file.Name != "" {
+		fileName = file.Name
+	} else {
+		fileName = file.Token
+	}
+
+	// Determine file type based on name or token
+	if strings.Contains(strings.ToLower(fileName), ".mp4") ||
+		strings.Contains(strings.ToLower(fileName), ".mov") ||
+		strings.Contains(strings.ToLower(fileName), ".avi") ||
+		strings.Contains(strings.ToLower(fileName), ".mkv") {
+		fileType = "视频"
+	} else if strings.Contains(strings.ToLower(fileName), ".pdf") {
+		fileType = "PDF"
+	} else if strings.Contains(strings.ToLower(fileName), ".doc") ||
+		strings.Contains(strings.ToLower(fileName), ".docx") {
+		fileType = "Word文档"
+	} else if strings.Contains(strings.ToLower(fileName), ".xls") ||
+		strings.Contains(strings.ToLower(fileName), ".xlsx") {
+		fileType = "Excel表格"
+	} else {
+		fileType = "文件"
+	}
+
+	buf.WriteString(fmt.Sprintf("\n**附件**: %s (%s)\n\n", fileName, fileType))
+
+	// Try to download the file if context and outputDir are set
+	// For file blocks inside documents, we should use DownloadDriveMedia
+	if p.ctx != nil && p.outputDir != "" && p.client != nil {
+		// Use DownloadDriveMedia for file blocks inside documents
+		resp, _, err := p.client.larkClient.Drive.DownloadDriveMedia(p.ctx, &lark.DownloadDriveMediaReq{
+			FileToken: file.Token,
+		})
+
+		if err == nil && resp != nil {
+			// File downloaded successfully
+			downloadedFilename := resp.Filename
+			if downloadedFilename == "" {
+				downloadedFilename = file.Token
+			}
+
+			filePath := filepath.Join(p.outputDir, downloadedFilename)
+			err := os.MkdirAll(filepath.Dir(filePath), 0o755)
+			if err == nil {
+				file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o666)
+				if err == nil {
+					written, err := file.ReadFrom(resp.File)
+					if err == nil {
+						buf.WriteString(fmt.Sprintf("**下载成功**: 文件已保存到 `%s` (大小: %d bytes)\n\n", filePath, written))
+						return buf.String()
+					}
+				}
+			}
+		}
+		// Download failed, fall through to placeholder
+	}
+
+	buf.WriteString(fmt.Sprintf("**文件Token**: `%s`\n\n", file.Token))
+	buf.WriteString(fmt.Sprintf("**提示**: 这是一个%s附件，请访问飞书查看原始文件。\n\n", fileType))
+
 	return buf.String()
 }
 
@@ -474,10 +578,19 @@ func (p *Parser) ParseDocxBlockTable(t *lark.DocxBlockTable) string {
 func (p *Parser) ParseDocxBlockQuoteContainer(b *lark.DocxBlock) string {
 	buf := new(strings.Builder)
 
-	for _, child := range b.Children {
+	for i, child := range b.Children {
 		block := p.blockMap[child]
 		buf.WriteString("> ")
-		buf.WriteString(p.ParseDocxBlock(block, 0))
+		content := p.ParseDocxBlock(block, 0)
+		// 移除内容末尾的换行符
+		content = strings.TrimRight(content, "\n")
+		buf.WriteString(content)
+		// 在行尾添加两个空格来实现换行（markdown 语法）
+		buf.WriteString("  ")
+		// 如果不是最后一个子块，则添加换行符
+		if i < len(b.Children)-1 {
+			buf.WriteString("\n")
+		}
 	}
 
 	return buf.String()
@@ -493,6 +606,231 @@ func (p *Parser) ParseDocxBlockGrid(b *lark.DocxBlock, indentLevel int) string {
 			buf.WriteString(p.ParseDocxBlock(block, indentLevel))
 		}
 	}
+
+	return buf.String()
+}
+
+func (p *Parser) ParseDocxBlockSheet(s *lark.DocxBlockSheet) string {
+	// 电子表格块（Sheet）是嵌入到飞书文档中的外部电子表格
+	buf := new(strings.Builder)
+
+	// 如果没有 client 或 token，则返回占位符
+	if p.client == nil || s.Token == "" {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *注：无法获取电子表格内容（缺少 client 或 token）*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 尝试获取电子表格的实际内容
+	ctx := context.Background()
+	values, err := p.client.GetSheetContent(ctx, s.Token)
+	if err != nil {
+		// 如果获取失败，返回占位符
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		// 检查是否是 token 格式问题
+		if strings.Contains(err.Error(), "invalid spreadsheet token format") {
+			buf.WriteString("> *注：此电子表格使用了不支持的嵌入方式，无法获取内容*\n")
+		} else if strings.Contains(err.Error(), "91402") || strings.Contains(err.Error(), "NOTEXIST") {
+			buf.WriteString("> *注：无法访问电子表格（可能没有权限或电子表格不存在）*\n")
+		} else {
+			buf.WriteString(fmt.Sprintf("> *获取电子表格内容失败: %v*\n", err))
+		}
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 将电子表格数据转换为 markdown 表格
+	if len(values) == 0 {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 嵌入的电子表格**\n")
+		buf.WriteString(">\n")
+		if s.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", s.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *电子表格为空*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 生成 markdown 表格
+	buf.WriteString("\n\n")
+	// 表头
+	buf.WriteString("|")
+	for _, cell := range values[0] {
+		buf.WriteString(" " + cell + " |")
+	}
+	buf.WriteString("\n")
+	// 分隔线
+	buf.WriteString("|")
+	for range values[0] {
+		buf.WriteString(" --- |")
+	}
+	buf.WriteString("\n")
+	// 数据行
+	for i := 1; i < len(values); i++ {
+		buf.WriteString("|")
+		for _, cell := range values[i] {
+			buf.WriteString(" " + cell + " |")
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("\n")
+
+	return buf.String()
+}
+
+// ParseDocxBlockBitable 解析多维表格块
+func (p *Parser) ParseDocxBlockBitable(bitable *lark.DocxBlockBitable) string {
+	buf := new(strings.Builder)
+
+	// 如果没有 client 或 token，则返回占位符
+	if p.client == nil || bitable.Token == "" {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 多维表格**\n")
+		buf.WriteString(">\n")
+		if bitable.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", bitable.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *注：无法获取多维表格内容（缺少 client 或 token）*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 尝试获取多维表格的实际内容
+	ctx := context.Background()
+	values, err := p.client.GetBitableContent(ctx, bitable.Token)
+	if err != nil {
+		// 如果获取失败，返回占位符
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 多维表格**\n")
+		buf.WriteString(">\n")
+		if bitable.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", bitable.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString(fmt.Sprintf("> *获取多维表格内容失败: %v*\n", err))
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 将多维表格数据转换为 markdown 表格
+	if len(values) == 0 {
+		buf.WriteString("\n\n")
+		buf.WriteString("> **📊 多维表格**\n")
+		buf.WriteString(">\n")
+		if bitable.Token != "" {
+			buf.WriteString(fmt.Sprintf("> Token: `%s`\n", bitable.Token))
+		}
+		buf.WriteString(">\n")
+		buf.WriteString("> *多维表格为空*\n")
+		buf.WriteString("\n\n")
+		return buf.String()
+	}
+
+	// 生成 markdown 表格
+	buf.WriteString("\n\n")
+	// 表头
+	buf.WriteString("|")
+	for _, cell := range values[0] {
+		buf.WriteString(" " + cell + " |")
+	}
+	buf.WriteString("\n")
+	// 分隔线
+	buf.WriteString("|")
+	for range values[0] {
+		buf.WriteString(" --- |")
+	}
+	buf.WriteString("\n")
+	// 数据行
+	for i := 1; i < len(values); i++ {
+		buf.WriteString("|")
+		for _, cell := range values[i] {
+			buf.WriteString(" " + cell + " |")
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("\n")
+
+	return buf.String()
+}
+
+// ParseDocxBlockDiagram 解析流程图/UML块
+func (p *Parser) ParseDocxBlockDiagram(diagram *lark.DocxBlockDiagram) string {
+	buf := new(strings.Builder)
+
+	diagramType := "流程图"
+	if diagram.DiagramType == 2 {
+		diagramType = "UML图"
+	}
+
+	buf.WriteString("\n\n")
+	buf.WriteString(fmt.Sprintf("**📈 %s**\n\n", diagramType))
+	buf.WriteString("> *注：流程图/UML图无法直接转换为 Markdown，建议导出为图片或使用 Mermaid 语法*\n")
+	buf.WriteString("\n\n")
+
+	return buf.String()
+}
+
+// ParseDocxBlockIframe 解析内嵌块
+func (p *Parser) ParseDocxBlockIframe(iframe *lark.DocxBlockIframe) string {
+	buf := new(strings.Builder)
+
+	buf.WriteString("\n\n")
+	buf.WriteString("**🔗 嵌入内容**\n\n")
+
+	if iframe.Component != nil {
+		// 获取 iframe 类型名称
+		typeNames := map[int]string{
+			1:  "哔哩哔哩",
+			2:  "西瓜视频",
+			3:  "优酷",
+			4:  "Airtable",
+			5:  "百度地图",
+			6:  "高德地图",
+			7:  "TikTok",
+			8:  "Figma",
+			9:  "墨刀",
+			10: "Canva",
+			11: "CodePen",
+			12: "飞书问卷",
+			13: "金数据",
+			14: "谷歌地图",
+			15: "YouTube",
+			99: "其他",
+		}
+
+		typeName := "未知类型"
+		if name, ok := typeNames[int(iframe.Component.IframeType)]; ok {
+			typeName = name
+		}
+
+		buf.WriteString(fmt.Sprintf("> 类型: %s\n", typeName))
+
+		// 显示 URL（如果有的话）
+		if iframe.Component.URL != "" {
+			buf.WriteString(">\n")
+			buf.WriteString(fmt.Sprintf("> 链接: %s\n", iframe.Component.URL))
+		}
+	}
+
+	buf.WriteString(">\n")
+	buf.WriteString("> *注：嵌入内容无法直接在 Markdown 中显示，请访问飞书查看原始内容*\n")
+	buf.WriteString("\n\n")
 
 	return buf.String()
 }
