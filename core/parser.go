@@ -14,7 +14,7 @@ import (
 )
 
 type Parser struct {
-	client     *Client
+	client      *Client
 	useHTMLTags bool
 	ImgTokens   []string
 	blockMap    map[string]*lark.DocxBlock
@@ -24,7 +24,7 @@ type Parser struct {
 
 func NewParser(config OutputConfig, client *Client) *Parser {
 	return &Parser{
-		client:     client,
+		client:      client,
 		useHTMLTags: config.UseHTMLTags,
 		ImgTokens:   make([]string, 0),
 		blockMap:    make(map[string]*lark.DocxBlock),
@@ -359,7 +359,7 @@ func (p *Parser) ParseDocxBlockImage(img *lark.DocxBlockImage) string {
 
 func (p *Parser) ParseDocxBlockFile(file *lark.DocxBlockFile) string {
 	buf := new(strings.Builder)
-	
+
 	// Get file extension to determine file type
 	var fileType string
 	var fileName string
@@ -368,27 +368,27 @@ func (p *Parser) ParseDocxBlockFile(file *lark.DocxBlockFile) string {
 	} else {
 		fileName = file.Token
 	}
-	
+
 	// Determine file type based on name or token
-	if strings.Contains(strings.ToLower(fileName), ".mp4") || 
-	   strings.Contains(strings.ToLower(fileName), ".mov") ||
-	   strings.Contains(strings.ToLower(fileName), ".avi") ||
-	   strings.Contains(strings.ToLower(fileName), ".mkv") {
+	if strings.Contains(strings.ToLower(fileName), ".mp4") ||
+		strings.Contains(strings.ToLower(fileName), ".mov") ||
+		strings.Contains(strings.ToLower(fileName), ".avi") ||
+		strings.Contains(strings.ToLower(fileName), ".mkv") {
 		fileType = "视频"
 	} else if strings.Contains(strings.ToLower(fileName), ".pdf") {
 		fileType = "PDF"
 	} else if strings.Contains(strings.ToLower(fileName), ".doc") ||
-	   strings.Contains(strings.ToLower(fileName), ".docx") {
+		strings.Contains(strings.ToLower(fileName), ".docx") {
 		fileType = "Word文档"
 	} else if strings.Contains(strings.ToLower(fileName), ".xls") ||
-	   strings.Contains(strings.ToLower(fileName), ".xlsx") {
+		strings.Contains(strings.ToLower(fileName), ".xlsx") {
 		fileType = "Excel表格"
 	} else {
 		fileType = "文件"
 	}
-	
+
 	buf.WriteString(fmt.Sprintf("\n**附件**: %s (%s)\n\n", fileName, fileType))
-	
+
 	// Try to download the file if context and outputDir are set
 	// For file blocks inside documents, we should use DownloadDriveMedia
 	if p.ctx != nil && p.outputDir != "" && p.client != nil {
@@ -396,14 +396,14 @@ func (p *Parser) ParseDocxBlockFile(file *lark.DocxBlockFile) string {
 		resp, _, err := p.client.larkClient.Drive.DownloadDriveMedia(p.ctx, &lark.DownloadDriveMediaReq{
 			FileToken: file.Token,
 		})
-		
+
 		if err == nil && resp != nil {
 			// File downloaded successfully
 			downloadedFilename := resp.Filename
 			if downloadedFilename == "" {
 				downloadedFilename = file.Token
 			}
-			
+
 			filePath := filepath.Join(p.outputDir, downloadedFilename)
 			err := os.MkdirAll(filepath.Dir(filePath), 0o755)
 			if err == nil {
@@ -419,10 +419,10 @@ func (p *Parser) ParseDocxBlockFile(file *lark.DocxBlockFile) string {
 		}
 		// Download failed, fall through to placeholder
 	}
-	
+
 	buf.WriteString(fmt.Sprintf("**文件Token**: `%s`\n\n", file.Token))
 	buf.WriteString(fmt.Sprintf("**提示**: 这是一个%s附件，请访问飞书查看原始文件。\n\n", fileType))
-	
+
 	return buf.String()
 }
 

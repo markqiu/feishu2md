@@ -264,7 +264,7 @@ func downloadWiki(ctx context.Context, client *core.Client, url string) error {
 					<-semaphore
 				}()
 			}
-			
+
 			// 然后递归处理子节点
 			if n.HasChild {
 				_folderPath := filepath.Join(folderPath, n.Title)

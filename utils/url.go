@@ -44,7 +44,7 @@ func ValidateWikiURL(url string) (string, string, error) {
 		wikiToken := matchResult[2]
 		return prefixURL, wikiToken, nil
 	}
-	
+
 	// Try to match /wiki/[node_token] format
 	reg = regexp.MustCompile(`^(https://[\w-.]+)/wiki/([a-zA-Z0-9]+)$`)
 	matchResult = reg.FindStringSubmatch(url)
@@ -53,6 +53,6 @@ func ValidateWikiURL(url string) (string, string, error) {
 		wikiToken := matchResult[2]
 		return prefixURL, wikiToken, nil
 	}
-	
+
 	return "", "", errors.Errorf("Invalid feishu/larksuite folder URL pattern")
 }

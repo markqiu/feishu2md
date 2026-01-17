@@ -112,30 +112,30 @@ func (c *Client) DownloadFile(ctx context.Context, fileToken, outDir, objType, t
 		file = resp.File
 		filename = resp.Filename
 	}
-	
+
 	// Use the original filename from the response
 	if filename == "" {
 		// Fallback to token if filename is empty
 		filename = fileToken
 	}
-	
+
 	filePath := filepath.Join(outDir, filename)
 	err = os.MkdirAll(filepath.Dir(filePath), 0o755)
 	if err != nil {
 		return "", err
 	}
-	
+
 	fileHandle, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o666)
 	if err != nil {
 		return "", err
 	}
 	defer fileHandle.Close()
-	
+
 	_, err = io.Copy(fileHandle, file)
 	if err != nil {
 		return "", err
 	}
-	
+
 	return filePath, nil
 }
 
@@ -144,13 +144,13 @@ func (c *Client) createFilePlaceholder(ctx context.Context, fileToken, outDir, o
 	// Create a markdown file with the same name as the title
 	mdFilename := title + ".md"
 	mdPath := filepath.Join(outDir, mdFilename)
-	
+
 	// Ensure the directory exists
 	err := os.MkdirAll(outDir, 0o755)
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Get the file type description
 	var fileType string
 	switch objType {
@@ -165,17 +165,17 @@ func (c *Client) createFilePlaceholder(ctx context.Context, fileToken, outDir, o
 	default:
 		fileType = "文件"
 	}
-	
+
 	content := fmt.Sprintf("# %s\n\n**文件类型**: %s\n\n", title, fileType)
 	content += fmt.Sprintf("**文件Token**: `%s`\n\n", fileToken)
 	content += fmt.Sprintf("**提示**: 这是一个%s文件，无法直接转换为Markdown。\n\n", fileType)
 	content += fmt.Sprintf("请访问飞书查看原始文件: [点击打开](https://jinniuai.feishu.cn/%s/%s)\n", objType, fileToken)
-	
+
 	err = os.WriteFile(mdPath, []byte(content), 0o644)
 	if err != nil {
 		return "", err
 	}
-	
+
 	return mdPath, nil
 }
 
@@ -289,34 +289,35 @@ func (c *Client) GetWikiNodeList(ctx context.Context, spaceID string, parentNode
 
 	return nodes, nil
 }
+
 // GetSheetContent 获取电子表格的内容
 func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]string, error) {
 	// sheetToken 的格式是：spreadsheet_token + "_" + sheet_id
 	// 例如：B3hasMxsshByaEtZxAwcVfWxnSe_Ml1QzO
 	// 需要解析出 spreadsheet_token 和 sheet_id
-	
+
 	// 查找最后一个下划线，分隔 spreadsheet_token 和 sheet_id
 	lastUnderscore := strings.LastIndex(sheetToken, "_")
 	if lastUnderscore == -1 {
 		return nil, fmt.Errorf("invalid sheet token format (missing underscore separator): %s", sheetToken)
 	}
-	
+
 	spreadsheetToken := sheetToken[:lastUnderscore]
 	sheetID := sheetToken[lastUnderscore+1:]
-	
+
 	// 定义原始 API 响应结构，使用 interface{} 来处理任意类型的值
 	type SheetValueResponse struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 		Data struct {
 			ValueRanges []struct {
-				MajorDimension string         `json:"majorDimension"`
-				Range          string         `json:"range"`
+				MajorDimension string          `json:"majorDimension"`
+				Range          string          `json:"range"`
 				Values         [][]interface{} `json:"values"`
 			} `json:"valueRanges"`
 		} `json:"data"`
 	}
-	
+
 	// 构建请求体
 	requestBody := map[string]interface{}{
 		"spreadsheetToken": spreadsheetToken,
@@ -326,7 +327,7 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	
+
 	// 创建 HTTP 请求
 	// 使用飞书 API 的 endpoint
 	url := "https://open.feishu.cn/open-apis/sheets/v4/spreadsheets/" + spreadsheetToken + "/values:batchGet"
@@ -334,16 +335,16 @@ func (c *Client) GetSheetContent(ctx context.Context, sheetToken string) ([][]st
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	// 设置请求头
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	
+
 	// 获取访问令牌
 	// 注意：这里需要从 lark client 获取访问令牌
 	// 由于 lark SDK 没有直接提供获取令牌的方法，我们需要使用 SDK 的认证机制
 	// 作为一个 workaround，我们使用 SDK 的方法，但手动处理响应
-	
+
 	// 尝试使用 SDK 的方法
 	valueResp, _, err := c.larkClient.Drive.BatchGetSheetValue(ctx, &lark.BatchGetSheetValueReq{
 		SpreadSheetToken: spreadsheetToken,
@@ -422,38 +423,38 @@ func (c *Client) GetBitableContent(ctx context.Context, bitableToken string) ([]
 	// bitableToken 的格式是：app_token + "_" + table_id
 	// 例如：CZJHb9XisaEsWosyB1pcAk2WnRg_tblxxxxx
 	// 需要解析出 app_token 和 table_id
-	
+
 	// 查找最后一个下划线，分隔 app_token 和 table_id
 	lastUnderscore := strings.LastIndex(bitableToken, "_")
 	if lastUnderscore == -1 {
 		return nil, fmt.Errorf("invalid bitable token format (missing underscore separator): %s", bitableToken)
 	}
-	
+
 	appToken := bitableToken[:lastUnderscore]
 	tableID := bitableToken[lastUnderscore+1:]
-	
+
 	// 1. 获取表格的字段信息
 	fieldResp, _, err := c.larkClient.Bitable.GetBitableFieldList(ctx, &lark.GetBitableFieldListReq{
 		AppToken: appToken,
-		TableID: tableID,
+		TableID:  tableID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bitable fields: %w", err)
 	}
-	
+
 	// 2. 获取表格的记录
 	recordResp, _, err := c.larkClient.Bitable.GetBitableRecordList(ctx, &lark.GetBitableRecordListReq{
 		AppToken: appToken,
-		TableID: tableID,
+		TableID:  tableID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bitable records: %w", err)
 	}
-	
+
 	// 3. 构建表格数据
 	// 第一行是字段名
 	var result [][]string
-	
+
 	// 添加表头（字段名）
 	if len(fieldResp.Items) > 0 {
 		var header []string
@@ -462,7 +463,7 @@ func (c *Client) GetBitableContent(ctx context.Context, bitableToken string) ([]
 		}
 		result = append(result, header)
 	}
-	
+
 	// 添加数据行
 	if len(recordResp.Items) > 0 {
 		for _, record := range recordResp.Items {
@@ -479,6 +480,6 @@ func (c *Client) GetBitableContent(ctx context.Context, bitableToken string) ([]
 			result = append(result, row)
 		}
 	}
-	
+
 	return result, nil
 }
